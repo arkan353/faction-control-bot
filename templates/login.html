@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Вход — {{ faction }}{% endblock %}
+{% block content %}
+<div class="login-wrap">
+  <div class="card login-card">
+    <h1>{{ faction }}</h1>
+    <p class="muted">Система управления фракцией</p>
+    {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+    {% if configured %}
+      <a class="btn discord" href="/login">Войти через Discord</a>
+      <p class="tiny muted">Нужен доступ к серверу фракции. Вход через OAuth2, пароль не запрашивается.</p>
+    {% else %}
+      <div class="code">
+        <div><code>CLIENT_ID=...</code></div>
+        <div><code>CLIENT_SECRET=...</code></div>
+        <div><code>BASE_URL=https://your-host</code></div>
+      </div>
+      <p class="tiny muted">Заполните <code>.env</code> и перезапустите панель.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,18 @@
+[Unit]
+Description=Faction Discord bot + web panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=%h/faction-bot
+EnvironmentFile=%h/faction-bot/.env
+ExecStart=%h/faction-bot/.venv/bin/python %h/faction-bot/app.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

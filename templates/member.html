@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% block title %}{{ m.display_name }} — личное дело{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div class="person">
+    {% if m.avatar %}<img class="avatar lg" src="{{ m.avatar }}" alt="">{% endif %}
+    <div>
+      <h1>{{ m.display_name }}</h1>
+      <p class="muted">
+        {{ m.username }} · ID {{ m.discord_id }}
+        {% if m.rank_name %}· <span style="color: {{ m.rank_color }}">{{ m.rank_name }}</span>{% endif %}
+      </p>
+    </div>
+  </div>
+  {% if is_self %}<span class="badge">это вы</span>{% endif %}
+</header>
+
+<div class="grid">
+  <section class="card stat-card">
+    <span class="label">Очки</span>
+    <span class="big">{{ m.score }}</span>
+    <span class="muted small">🟢 {{ stats.positive }} · 🔴 {{ stats.negative }} · ⚪ {{ stats.neutral }}</span>
+  </section>
+  <section class="card stat-card">
+    <span class="label">Ранг</span>
+    <span class="big" style="color: {{ m.rank_color or '#e5e7eb' }}">{{ m.rank_name or 'без ранга' }}</span>
+    <span class="muted small">уровень {{ m.rank_level if m.rank_level is not none else '—' }}</span>
+  </section>
+  <section class="card stat-card">
+    <span class="label">В системе с</span>
+    <span class="big small-big">{{ m.joined_at|dt }}</span>
+    <span class="muted small">позывной: {{ m.callsign or '—' }}</span>
+  </section>
+</div>
+
+{% if progress.next %}
+<section class="card">
+  <h2>До следующего ранга</h2>
+  <div class="progress"><div class="bar" style="width: {{ progress.percent }}%"></div></div>
+  <p class="muted small"><strong>{{ progress.next.name }}</strong> — осталось {{ progress.remaining }} очков ({{ progress.percent }}%).</p>
+</section>
+{% endif %}
+
+{% if m.note %}
+<section class="card">
+  <h2>Примечание офицера</h2>
+  <p class="pre">{{ m.note }}</p>
+</section>
+{% endif %}
+
+{% if officer %}
+<div class="grid two">
+  <section class="card">
+    <h2>Выдать отметку</h2>
+    <form method="post" action="/members/{{ m.discord_id }}/marks" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label>Название
+        <input name="title" required maxlength="100" placeholder="Например: Выговор за нарушение">
+      </label>
+      <div class="row">
+        <label>Влияние на очки
+          <input name="delta" type="number" value="0" min="-100" max="100" step="1">
+        </label>
+        <label>Быстрый шаблон
+          <select id="preset">
+            <option value="">— выбрать —</option>
+            {% for p in presets %}
+              <option value="{{ p.title }}" data-delta="{{ p.delta }}">{{ p.title }} ({{ '%+d'|format(p.delta) }})</option>
+            {% endfor %}
+          </select>
+        </label>
+      </div>
+      <label>Комментарий
+        <textarea name="comment" rows="3" maxlength="1000" placeholder="Основание, детали, ссылки"></textarea>
+      </label>
+      <button class="btn" type="submit">Добавить отметку</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Ранг и профиль</h2>
+    <form method="post" action="/members/{{ m.discord_id }}/rank" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label>Ранг вручную
+        <select name="rank_id">
+          <option value="">— без ранга —</option>
+          {% for r in ranks %}
+            <option value="{{ r.id }}" {% if m.rank_id == r.id %}selected{% endif %}>
+              {{ r.name }} (ур. {{ r.level }}, от {{ r.min_score }})
+            </option>
+          {% endfor %}
+        </select>
+      </label>
+      <button class="btn ghost" type="submit">Назначить ранг</button>
+    </form>
+
+    <form method="post" action="/members/{{ m.discord_id }}/profile" class="stack mt">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label>Позывной
+        <input name="callsign" value="{{ m.callsign }}" maxlength="64">
+      </label>
+      <label>Примечание
+        <textarea name="note" rows="3" maxlength="2000">{{ m.note }}</textarea>
+      </label>
+      <button class="btn ghost" type="submit">Сохранить</button>
+    </form>
+  </section>
+</div>
+{% elif is_self %}
+<section class="card">
+  <h2>Мой профиль</h2>
+  <form method="post" action="/members/{{ m.discord_id }}/profile" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Позывной
+      <input name="callsign" value="{{ m.callsign }}" maxlength="64" placeholder="Ваш позывной">
+    </label>
+    <button class="btn ghost" type="submit">Сохранить</button>
+  </form>
+</section>
+{% endif %}
+
+<section class="card">
+  <h2>Личное дело — отметки</h2>
+  {% if marks %}
+  <table>
+    <thead>
+      <tr><th>#</th><th>Отметка</th><th>Влияние</th><th>Кто выдал</th><th>Когда</th>{% if officer %}<th></th>{% endif %}</tr>
+    </thead>
+    <tbody>
+    {% for k in marks %}
+      <tr class="{% if k.revoked_at %}revoked{% endif %}">
+        <td class="muted">{{ k.id }}</td>
+        <td>
+          <strong>{{ k.title }}</strong>
+          {% if k.comment %}<div class="muted small">{{ k.comment }}</div>{% endif %}
+          {% if k.revoked_at %}<div class="tiny muted">отозвана {{ k.revoked_by }}</div>{% endif %}
+        </td>
+        <td class="{{ 'pos' if k.delta > 0 else ('neg' if k.delta < 0 else 'neu') }}">{{ '%+d'|format(k.delta) }}</td>
+        <td class="muted small">{{ k.issued_name or '—' }}</td>
+        <td class="muted small">{{ k.created_at|dt }}</td>
+        {% if officer %}
+        <td>
+          {% if not k.revoked_at %}
+          <form method="post" action="/marks/{{ k.id }}/revoke" onsubmit="return confirm('Отозвать отметку?')">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <button class="link-btn danger" type="submit">отозвать</button>
+          </form>
+          {% endif %}
+        </td>
+        {% endif %}
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">В личном деле нет отметок.</p>
+  {% endif %}
+</section>
+
+<script>
+  const preset = document.getElementById('preset');
+  if (preset) {
+    preset.addEventListener('change', () => {
+      const opt = preset.selectedOptions[0];
+      if (!opt || !opt.value) return;
+      const form = preset.closest('form');
+      form.querySelector('input[name="title"]').value = opt.value;
+      form.querySelector('input[name="delta"]').value = opt.dataset.delta;
+    });
+  }
+</script>
+{% endblock %}

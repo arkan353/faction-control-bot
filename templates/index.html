@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Обзор — {{ faction }}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>Обзор</h1>
+    <p class="muted">Сводка по фракции и ваш текущий статус</p>
+  </div>
+  {% if officer %}<a class="btn" href="/members">Состав →</a>{% endif %}
+</header>
+
+{% if not me %}
+  <div class="card">
+    <p>Ваше личное дело ещё не создано. Оно появится автоматически при первом действии офицера.</p>
+  </div>
+{% else %}
+<div class="grid">
+  <section class="card stat-card">
+    <span class="label">Текущий ранг</span>
+    <span class="big" style="color: {{ me.rank_color or '#e5e7eb' }}">{{ me.rank_name or 'без ранга' }}</span>
+    <span class="muted small">уровень {{ me.rank_level if me.rank_level is not none else '—' }}</span>
+  </section>
+  <section class="card stat-card">
+    <span class="label">Очки</span>
+    <span class="big">{{ me.score }}</span>
+    <span class="muted small">🟢 {{ stats.positive }} · 🔴 {{ stats.negative }} · ⚪ {{ stats.neutral }}</span>
+  </section>
+  <section class="card stat-card">
+    <span class="label">Состав</span>
+    <span class="big">{{ member_count }}</span>
+    <span class="muted small">участников в системе</span>
+  </section>
+</div>
+
+<section class="card">
+  <h2>Прогресс по лестнице рангов</h2>
+  {% if progress.next %}
+    <div class="progress"><div class="bar" style="width: {{ progress.percent }}%"></div></div>
+    <p class="muted small">
+      До ранга <strong>{{ progress.next.name }}</strong> осталось {{ progress.remaining }} очков
+      ({{ progress.percent }}%).
+    </p>
+  {% else %}
+    <p class="muted">Максимальный ранг достигнут.</p>
+  {% endif %}
+  <div class="ladder">
+    {% for r in ranks %}
+      <span class="chip {% if me.rank_id == r.id %}chip-on{% endif %}"
+            style="--c: {{ r.color }}">{{ r.name }}</span>
+    {% endfor %}
+  </div>
+</section>
+
+<section class="card">
+  <h2>Последние отметки</h2>
+  {% if marks %}
+  <table>
+    <thead><tr><th>#</th><th>Отметка</th><th>Влияние</th><th>Кто</th><th>Когда</th></tr></thead>
+    <tbody>
+    {% for m in marks %}
+      <tr>
+        <td class="muted">{{ m.id }}</td>
+        <td>
+          <strong>{{ m.title }}</strong>
+          {% if m.comment %}<div class="muted small">{{ m.comment }}</div>{% endif %}
+        </td>
+        <td class="{{ 'pos' if m.delta > 0 else ('neg' if m.delta < 0 else 'neu') }}">{{ '%+d'|format(m.delta) }}</td>
+        <td class="muted small">{{ m.issued_name or '—' }}</td>
+        <td class="muted small">{{ m.created_at|dt }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">Отметок пока нет.</p>
+  {% endif %}
+</section>
+{% endif %}
+
+{% if officer %}
+<div class="grid two">
+  <section class="card">
+    <h2>Свежие отметки по фракции</h2>
+    {% if recent %}
+      <ul class="list">
+      {% for m in recent %}
+        <li>
+          <a href="/members/{{ m.member_id }}">{{ m.member_name or m.member_id }}</a>
+          <span class="{{ 'pos' if m.delta > 0 else ('neg' if m.delta < 0 else 'neu') }}">{{ '%+d'|format(m.delta) }}</span>
+          <span class="muted small">«{{ m.title }}»</span>
+        </li>
+      {% endfor %}
+      </ul>
+    {% else %}<p class="muted">Пока пусто.</p>{% endif %}
+  </section>
+  <section class="card">
+    <h2>Журнал действий</h2>
+    {% if audit %}
+      <ul class="list">
+      {% for a in audit %}
+        <li>
+          <span class="muted small">{{ a.created_at|dt }}</span>
+          <strong>{{ a.actor }}</strong>
+          <span class="muted small">{{ a.action }}</span>
+          <span class="small">{{ a.target }}</span>
+        </li>
+      {% endfor %}
+      </ul>
+    {% else %}<p class="muted">Пока пусто.</p>{% endif %}
+  </section>
+</div>
+{% endif %}
+{% endblock %}

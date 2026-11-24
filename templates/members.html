@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Состав — {{ faction }}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>Состав</h1>
+    <p class="muted">Все участники фракции и их личные дела</p>
+  </div>
+</header>
+
+<form class="filters" method="get" action="/members">
+  <input name="q" value="{{ q }}" placeholder="Поиск по имени или позывному">
+  <select name="rank">
+    <option value="">Все ранги</option>
+    {% for r in ranks %}
+      <option value="{{ r.id }}" {% if selected_rank == r.id|string %}selected{% endif %}>{{ r.name }}</option>
+    {% endfor %}
+  </select>
+  <button class="btn ghost" type="submit">Найти</button>
+</form>
+
+<section class="card">
+  {% if members %}
+  <table>
+    <thead><tr><th>Участник</th><th>Ранг</th><th>Очки</th><th>Позывной</th><th>В системе</th></tr></thead>
+    <tbody>
+    {% for u in members %}
+      <tr>
+        <td>
+          <a class="row-person" href="/members/{{ u.discord_id }}">
+            {% if u.avatar %}<img class="avatar sm" src="{{ u.avatar }}" alt="">{% endif %}
+            <span>{{ u.display_name }}</span>
+          </a>
+        </td>
+        <td style="color: {{ u.rank_color or '#9ca3af' }}">{{ u.rank_name or '—' }}</td>
+        <td>{{ u.score }}</td>
+        <td class="muted small">{{ u.callsign or '—' }}</td>
+        <td class="muted small">{{ u.joined_at|dt }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">Никого не найдено.</p>
+  {% endif %}
+</section>
+{% endblock %}

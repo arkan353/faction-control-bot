@@ -1,0 +1,98 @@
+{% extends "base.html" %}
+{% block title %}Ранги — {{ faction }}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>Ранги</h1>
+    <p class="muted">Названия, роли Discord и пороги автоматического повышения</p>
+  </div>
+</header>
+
+{% if auto_rank %}
+  <div class="alert info">Авторанг включён: после каждой отметки ранг пересчитывается по порогам очков.</div>
+{% else %}
+  <div class="alert warn">Авторанг выключен: ранги назначаются только вручную.</div>
+{% endif %}
+
+<section class="card">
+  <h2>Лестница рангов</h2>
+  {% if ranks %}
+  <table>
+    <thead>
+      <tr><th>Название</th><th>Роль Discord (ID)</th><th>Уровень</th><th>Порог очков</th><th>Участников</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for r in ranks %}
+      <tr>
+        <td>
+          <form method="post" action="/ranks/{{ r.id }}" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <input class="w-name" name="name" value="{{ r.name }}" required maxlength="80">
+        </td>
+        <td>
+            <input class="w-num" name="role_id" value="{{ r.role_id or '' }}" placeholder="ID роли">
+        </td>
+        <td><input class="w-sm" name="level" type="number" value="{{ r.level }}"></td>
+        <td><input class="w-sm" name="min_score" type="number" value="{{ r.min_score }}"></td>
+        <td class="muted">{{ counts.get(r.id|string, 0) }}</td>
+        <td class="actions">
+            <input type="color" name="color" value="{{ r.color }}" title="Цвет">
+            <input type="hidden" name="description" value="{{ r.description }}">
+            <button class="link-btn" type="submit">сохранить</button>
+          </form>
+          <form method="post" action="/ranks/{{ r.id }}/delete" onsubmit="return confirm('Удалить ранг {{ r.name }}?')">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <button class="link-btn danger" type="submit">удалить</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">Рангов ещё нет — создайте первый ниже.</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>Новый ранг</h2>
+  <form method="post" action="/ranks" class="row wrap">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Название<input name="name" required maxlength="80" placeholder="Офицер"></label>
+    <label>ID роли Discord<input name="role_id" placeholder="123456789012345678"></label>
+    <label>Уровень<input name="level" type="number" value="0"></label>
+    <label>Порог очков<input name="min_score" type="number" value="0"></label>
+    <label>Цвет<input name="color" type="color" value="#6b7280"></label>
+    <label>Описание<input name="description" maxlength="300" placeholder="Необязательно"></label>
+    <button class="btn" type="submit">Создать ранг</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>Шаблоны отметок</h2>
+  <p class="muted small">Быстрый выбор при выдаче отметки в личном деле.</p>
+  <table>
+    <thead><tr><th>Название</th><th>Влияние</th><th></th></tr></thead>
+    <tbody>
+    {% for p in presets %}
+      <tr>
+        <td>{{ p.title }}</td>
+        <td class="{{ 'pos' if p.delta > 0 else ('neg' if p.delta < 0 else 'neu') }}">{{ '%+d'|format(p.delta) }}</td>
+        <td>
+          <form method="post" action="/presets/{{ p.id }}/delete">
+            <input type="hidden" name="csrf_token" value="{{ csrf }}">
+            <button class="link-btn danger" type="submit">удалить</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <form method="post" action="/presets" class="row wrap mt">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Название<input name="title" required maxlength="60" placeholder="Благодарность"></label>
+    <label>Влияние<input name="delta" type="number" value="5" min="-100" max="100"></label>
+    <button class="btn ghost" type="submit">Добавить шаблон</button>
+  </form>
+</section>
+{% endblock %}

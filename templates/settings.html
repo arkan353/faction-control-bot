@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Настройки — {{ faction }}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div><h1>Настройки</h1><p class="muted">Параметры системы и журнал действий</p></div>
+</header>
+
+<div class="grid two">
+  <section class="card">
+    <h2>Основное</h2>
+    <form method="post" action="/settings" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label>Название фракции
+        <input name="faction_name" value="{{ faction }}" maxlength="64">
+      </label>
+      <label class="check">
+        <input type="checkbox" name="auto_rank" {% if auto_rank %}checked{% endif %}>
+        Автоматически менять ранг по сумме очков
+      </label>
+      <button class="btn" type="submit">Сохранить</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Подключение</h2>
+    <ul class="kv">
+      <li><span>Сервер</span><strong>{{ guild_name }}</strong></li>
+      <li><span>ID сервера</span><strong>{{ guild_id }}</strong></li>
+      <li><span>Внешний адрес</span><strong>{{ base_url }}</strong></li>
+      <li><span>OAuth2</span><strong>{{ 'настроен' if oauth_ok else 'не настроен' }}</strong></li>
+      <li><span>Redirect URI</span><code>{{ base_url }}/callback</code></li>
+    </ul>
+    <p class="tiny muted">
+      Redirect URI нужно добавить в Discord Developer Portal → OAuth2 → Redirects.
+      Боту требуются права «Управление ролями», а его роль должна быть выше ролей рангов.
+    </p>
+  </section>
+</div>
+
+<section class="card">
+  <h2>Журнал действий</h2>
+  {% if audit %}
+  <table>
+    <thead><tr><th>Когда</th><th>Кто</th><th>Действие</th><th>Объект</th><th>Детали</th></tr></thead>
+    <tbody>
+    {% for a in audit %}
+      <tr>
+        <td class="muted small">{{ a.created_at|dt }}</td>
+        <td>{{ a.actor }}</td>
+        <td><code>{{ a.action }}</code></td>
+        <td class="small">{{ a.target }}</td>
+        <td class="muted small">{{ a.details }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+    <p class="muted">Журнал пуст.</p>
+  {% endif %}
+</section>
+{% endblock %}

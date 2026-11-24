@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}{{ faction }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="/">
+      <span class="brand-mark">◆</span>
+      <span class="brand-text">{{ faction }}</span>
+    </a>
+    <nav>
+      <a href="/" class="{% if request.url.path == '/' %}active{% endif %}">Обзор</a>
+      {% if user %}
+        <a href="/me" class="{% if request.url.path.startswith('/members/') %}active{% endif %}">Личное дело</a>
+      {% endif %}
+      {% if officer %}
+        <a href="/members" class="{% if request.url.path == '/members' %}active{% endif %}">Состав</a>
+        <a href="/ranks" class="{% if request.url.path == '/ranks' %}active{% endif %}">Ранги</a>
+        <a href="/settings" class="{% if request.url.path == '/settings' %}active{% endif %}">Настройки</a>
+      {% endif %}
+    </nav>
+    {% if user %}
+    <div class="sidebar-foot">
+      <img class="avatar" src="{{ user.avatar }}" alt="">
+      <div class="who">
+        <span class="who-name">{{ user.display_name }}</span>
+        <span class="who-tag">{% if officer %}офицер{% else %}участник{% endif %}</span>
+      </div>
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf }}">
+        <button class="link-btn" type="submit" title="Выйти">⏏</button>
+      </form>
+    </div>
+    {% endif %}
+  </aside>
+  <main class="content">
+    {% if flash %}<div class="alert info">{{ flash }}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+</div>
+</body>
+</html>
