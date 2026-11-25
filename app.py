@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import signal
 import sys
 
 import uvicorn
@@ -61,16 +62,30 @@ async def _run() -> None:
     web_task = asyncio.create_task(server.serve(), name="web")
     bot_task = asyncio.create_task(discord_bot.start(DISCORD_TOKEN), name="discord")
 
-    done, pending = await asyncio.wait(
-        {web_task, bot_task}, return_when=asyncio.FIRST_COMPLETED
-    )
+    # Stop signals (Ctrl+C, `docker stop`) are handled here instead of letting
+    # asyncio.run() cancel the loop mid-lifespan: uvicorn's own handling is
+    # disabled in WebServer above, so this is the only clean path.
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    stop_task = asyncio.create_task(stop.wait(), name="stop")
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+            loop.add_signal_handler(sig, stop.set)
 
+    done, pending = await asyncio.wait(
+        {web_task, bot_task, stop_task}, return_when=asyncio.FIRST_COMPLETED
+    )
     for task in done:
+        if task is stop_task:
+            log.info("Получен сигнал остановки")
+            continue
         exc = task.exception()
         if exc is not None:
             log.error("Задача %s завершилась с ошибкой: %s", task.get_name(), exc)
 
-    # One side stopped: ask the other to finish its own shutdown first.
+    # One side stopped (or a signal arrived): ask the other to finish its own
+    # shutdown first, then give it a grace period.
+    stop_task.cancel()
     server.should_exit = True
     if not discord_bot.is_closed():
         await discord_bot.close()
@@ -80,6 +95,9 @@ async def _run() -> None:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+            loop.remove_signal_handler(sig)
 
 
 def run() -> None:

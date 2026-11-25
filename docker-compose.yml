@@ -1,0 +1,66 @@
+# Faction Control — bot + web panel in one container.
+#
+#   cp .env.example .env      # fill in DISCORD_TOKEN, CLIENT_ID, CLIENT_SECRET, BASE_URL
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# BASE_URL in .env must be the public address of the panel, e.g.
+# https://faction.example.com — Discord redirect URI is BASE_URL/callback.
+
+services:
+  faction-bot:
+    build:
+      context: .
+      args:
+        # Keep in sync with the owner of ./data on the host: `id -u` / `id -g`.
+        APP_UID: ${APP_UID:-1000}
+        APP_GID: ${APP_GID:-1000}
+    image: faction-bot:latest
+    container_name: faction-bot
+    restart: unless-stopped
+
+    env_file:
+      - .env
+    environment:
+      # Container-internal port. The host mapping below is what you expose;
+      # PORT from .env is deliberately ignored so the mapping always lines up.
+      PORT: "8000"
+      HOST: 0.0.0.0
+      DB_PATH: /app/data/faction.db
+      TZ: ${TZ:-Europe/Moscow}
+
+    ports:
+      - "${PANEL_PORT:-8000}:8000"
+
+    volumes:
+      # SQLite DB + persisted session key live here. Back this up.
+      - ./data:/app/data
+
+    # app.py handles SIGTERM itself: Discord closes, then uvicorn drains.
+    stop_grace_period: 30s
+
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import os,urllib.request;urllib.request.urlopen('http://127.0.0.1:'+os.getenv('PORT','8000')+'/health',timeout=3)
+      interval: 30s
+      timeout: 5s
+      start_period: 25s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

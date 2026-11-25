@@ -1,0 +1,19 @@
+# Build context exclusions for faction-bot.
+.git
+.gitignore
+.venv
+.env
+.env.*
+!.env.example
+data
+__pycache__
+*.py[cod]
+.ruff_cache
+.pytest_cache
+*.db
+*.log
+tests
+Dockerfile
+docker-compose*.yml
+.dockerignore
+README.md

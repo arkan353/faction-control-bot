@@ -96,6 +96,9 @@ config.py       конфигурация из .env
 templates/      Jinja2-шаблоны панели
 static/app.css  стили
 tests/          офлайн-тесты панели, логики и OAuth-хелперов
+Dockerfile      образ бота+панели
+docker-compose.yml   запуск с томом ./data
+docker-entrypoint.sh проверка прав на каталог данных
 ```
 
 ## Тесты
@@ -103,6 +106,44 @@ tests/          офлайн-тесты панели, логики и OAuth-хе
 ```bash
 .venv/bin/python tests/test_web.py    # HTTP-панель: права, CSRF, отметки
 .venv/bin/python tests/test_core.py   # авторанг, отзыв, синхронизация ролей, OAuth
+```
+
+## Docker
+
+Бот и панель живут в одном контейнере (один процесс, как и при `run.sh`).
+
+```bash
+cp .env.example .env    # DISCORD_TOKEN, CLIENT_ID, CLIENT_SECRET, BASE_URL
+mkdir -p data           # сюда монтируется база и session.key
+docker compose up -d --build
+docker compose logs -f
+```
+
+В `BASE_URL` укажите публичный адрес панели — redirect URI в Discord
+остаётся `BASE_URL/callback`.
+
+Что важно знать про образ:
+
+- Порт внутри контейнера всегда `8000`; наружу выставляется `PANEL_PORT`
+  (по умолчанию тоже `8000`). `PORT` из `.env` в контейнере игнорируется,
+  чтобы маппинг портов не разъезжался.
+- `./data` монтируется в `/app/data` — там SQLite-база и ключ сессии.
+  Это единственный изменяемый каталог (корень ФС только для чтения).
+- Контейнер работает не от root. Если `./data` принадлежит другому uid,
+  задайте его: `APP_UID=$(id -u) APP_GID=$(id -g) docker compose up -d --build`.
+- Остановка штатная: `docker stop` шлёт `SIGTERM`, `app.py` сам закрывает Discord
+  и затем uvicorn (`stop_grace_period: 30s`).
+- Healthcheck бьёт в `/health`; `docker compose ps` покажет `healthy`.
+- Если каталог `./data` недоступен для записи, контейнер упадёт сразу с понятным
+  сообщением вместо трейсбека SQLite (`docker-entrypoint.sh`).
+
+Без compose:
+
+```bash
+docker build -t faction-bot:latest .
+docker run -d --name faction-bot --restart unless-stopped \
+  --env-file .env -e PORT=8000 -e DB_PATH=/app/data/faction.db \
+  -p 8000:8000 -v "$PWD/data:/app/data" faction-bot:latest
 ```
 
 ## systemd
