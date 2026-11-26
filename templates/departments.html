@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}Отделы — {{ faction }}{% endblock %}
+{% block content %}
+<header class="page-head">
+  <div>
+    <h1>Отделы</h1>
+    <p class="muted">У каждого отдела своя лестница ступеней — участник двигается только по ней</p>
+  </div>
+</header>
+
+{% for d in departments %}
+<section class="card">
+  <div class="dept-head">
+    <h2>
+      <span class="dot" style="--c: {{ d.color }}"></span>
+      {{ d.name }}
+      {% if d.id == default_department %}
+        <span class="badge">по умолчанию</span>
+      {% endif %}
+    </h2>
+    <span class="muted small">{{ d.member_count }} чел. · {{ d.rank_count }} ступеней</span>
+  </div>
+  {% if d.description %}<p class="muted small">{{ d.description }}</p>{% endif %}
+
+  {% if ladders[d.id] %}
+    <div class="ladder">
+      {% for r in ladders[d.id] %}
+        <span class="chip" style="--c: {{ r.color }}">{{ r.name }}</span>
+        {% if not loop.last %}<span class="muted tiny">→</span>{% endif %}
+      {% endfor %}
+    </div>
+    <p class="muted tiny">Снизу вверх: {{ ladders[d.id]|map(attribute='name')|join(' → ') }}</p>
+  {% else %}
+    <p class="muted small">Лестница пуста — добавьте ступени на странице «Ранги».</p>
+  {% endif %}
+
+  <form method="post" action="/departments/{{ d.id }}" class="row wrap mt">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Название<input name="name" value="{{ d.name }}" required maxlength="80"></label>
+    <label>Описание<input name="description" value="{{ d.description }}" maxlength="300"></label>
+    <label>ID роли Discord<input name="role_id" value="{{ d.role_id or '' }}" placeholder="необязательно"></label>
+    <label>Цвет<input name="color" type="color" value="{{ d.color }}"></label>
+    <button class="btn ghost" type="submit">Сохранить</button>
+  </form>
+
+  <div class="actions mt">
+    {% if d.id != default_department %}
+    <form method="post" action="/departments/{{ d.id }}/default">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <button class="link-btn" type="submit">сделать отделом по умолчанию</button>
+    </form>
+    {% endif %}
+    <form method="post" action="/departments/{{ d.id }}/delete"
+          onsubmit="return confirm('Удалить отдел {{ d.name }} вместе с его лестницей?')">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <button class="link-btn danger" type="submit">удалить отдел</button>
+    </form>
+  </div>
+</section>
+{% else %}
+<section class="card"><p class="muted">Отделов нет — создайте первый ниже.</p></section>
+{% endfor %}
+
+<section class="card">
+  <h2>Новый отдел</h2>
+  <form method="post" action="/departments" class="row wrap">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <label>Название<input name="name" required maxlength="80" placeholder="Отдел кадров"></label>
+    <label>Описание<input name="description" maxlength="300" placeholder="Необязательно"></label>
+    <label>ID роли Discord<input name="role_id" placeholder="необязательно"></label>
+    <label>Цвет<input name="color" type="color" value="#5865f2"></label>
+    <label>Скопировать лестницу из
+      <select name="copy_from">
+        <option value="">— пустая лестница —</option>
+        {% for d in departments %}
+          <option value="{{ d.id }}">{{ d.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button class="btn" type="submit">Создать отдел</button>
+  </form>
+</section>
+{% endblock %}

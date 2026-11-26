@@ -190,13 +190,31 @@ def build_bot() -> FactionBot:
     rank_group = app_commands.Group(name="rank", description="Управление рангами фракции")
 
     @rank_group.command(name="list", description="Показать лестницу рангов")
-    async def rank_list(interaction: discord.Interaction) -> None:
-        ranks = db.list_ranks()
+    @app_commands.describe(department="Показать только один отдел")
+    async def rank_list(
+        interaction: discord.Interaction, department: str | None = None
+    ) -> None:
+        dept_id: int | None = None
+        if department:
+            found = _find_department(department)
+            if found is None:
+                await interaction.response.send_message("Отдел не найден.", ephemeral=True)
+                return
+            dept_id = int(found["id"])
+        ranks = db.list_ranks(dept_id)
         if not ranks:
             await interaction.response.send_message("Ранги ещё не настроены.", ephemeral=True)
             return
         embed = _embed(f"Ранги — {core.faction_name()}")
+        current_dept: Any = object()
         for r in ranks:
+            if r["department_name"] != current_dept:
+                current_dept = r["department_name"]
+                embed.add_field(
+                    name=f"▸ {current_dept or 'Без отдела'}",
+                    value="\u200b",
+                    inline=False,
+                )
             role = f"<@&{r['role_id']}>" if r["role_id"] else "*роль не привязана*"
             embed.add_field(
                 name=f"{r['name']}  ·  ур. {r['level']}",
@@ -213,6 +231,7 @@ def build_bot() -> FactionBot:
         level="Позиция в иерархии (больше = выше)",
         min_score="Минимальный счёт для автоматического повышения",
         color="Цвет в hex, например #f87171",
+        department="Отдел, в чью лестницу входит ранг",
     )
     async def rank_create(
         interaction: discord.Interaction,
@@ -221,7 +240,15 @@ def build_bot() -> FactionBot:
         level: int = 0,
         min_score: int = 0,
         color: str = "#6b7280",
+        department: str | None = None,
     ) -> None:
+        dept_id = db.default_department_id()
+        if department:
+            found = _find_department(department)
+            if found is None:
+                await interaction.response.send_message("Отдел не найден.", ephemeral=True)
+                return
+            dept_id = int(found["id"])
         try:
             rank_id = db.create_rank(
                 name=name,
@@ -229,6 +256,7 @@ def build_bot() -> FactionBot:
                 level=level,
                 min_score=min_score,
                 color=color,
+                department_id=dept_id,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced to the officer
             await interaction.response.send_message(f"⚠️ Не удалось создать ранг: {exc}", ephemeral=True)
@@ -236,12 +264,15 @@ def build_bot() -> FactionBot:
         db.log_action(
             interaction.user.id, str(interaction.user), "rank.create", target=name, details=f"id={rank_id}"
         )
+        dept = db.get_department(dept_id) if dept_id else None
         await interaction.response.send_message(
-            f"✅ Ранг **{name}** создан (уровень {level}, порог {min_score})."
+            f"✅ Ранг **{name}** создан (уровень {level}, порог {min_score})"
+            + (f" в отделе **{dept['name']}**." if dept else ".")
         )
 
     @rank_group.command(name="edit", description="Изменить ранг")
     @officer_only()
+    @app_commands.describe(department="Перенести ранг в другой отдел")
     async def rank_edit(
         interaction: discord.Interaction,
         rank: str,
@@ -250,12 +281,19 @@ def build_bot() -> FactionBot:
         level: int | None = None,
         min_score: int | None = None,
         color: str | None = None,
+        department: str | None = None,
     ) -> None:
         target = _find_rank(rank)
         if target is None:
             await interaction.response.send_message("Ранг не найден.", ephemeral=True)
             return
         fields: dict[str, Any] = {}
+        if department:
+            found = _find_department(department)
+            if found is None:
+                await interaction.response.send_message("Отдел не найден.", ephemeral=True)
+                return
+            fields["department_id"] = int(found["id"])
         if name:
             fields["name"] = name
         if role is not None:
@@ -313,6 +351,230 @@ def build_bot() -> FactionBot:
         await interaction.followup.send(msg, ephemeral=True)
 
     bot.tree.add_command(rank_group)
+
+    # -------------------------------------------------------------- /department
+    dept_group = app_commands.Group(
+        name="department", description="Отделы фракции и их иерархии"
+    )
+
+    @dept_group.command(name="list", description="Показать отделы и их ступени")
+    async def department_list(interaction: discord.Interaction) -> None:
+        departments = db.list_departments()
+        if not departments:
+            await interaction.response.send_message("Отделов пока нет.", ephemeral=True)
+            return
+        embed = _embed(f"Отделы — {core.faction_name()}")
+        for d in departments:
+            ladder = list(reversed(db.rank_ladder(int(d["id"]))))
+            rungs = " → ".join(str(r["name"]) for r in ladder) or "*лестница пуста*"
+            embed.add_field(
+                name=f"{d['name']} · {d['member_count']} чел.",
+                value=f"{rungs}\n{d['description'] or 'без описания'}",
+                inline=False,
+            )
+        await interaction.response.send_message(embed=embed)
+
+    @dept_group.command(name="create", description="Создать отдел")
+    @officer_only()
+    @app_commands.describe(
+        name="Название отдела",
+        description="Короткое описание",
+        role="Роль Discord, отмечающая принадлежность к отделу",
+        color="Цвет в hex, например #5865f2",
+        copy_from="Скопировать лестницу рангов из этого отдела",
+    )
+    async def department_create(
+        interaction: discord.Interaction,
+        name: str,
+        description: str = "",
+        role: discord.Role | None = None,
+        color: str = "#5865f2",
+        copy_from: str | None = None,
+    ) -> None:
+        try:
+            dept_id = db.create_department(
+                name=name,
+                description=description,
+                color=color,
+                role_id=role.id if role else None,
+            )
+        except Exception as exc:  # noqa: BLE001 - unique name constraint
+            await interaction.response.send_message(
+                f"⚠️ Не удалось создать отдел: {exc}", ephemeral=True
+            )
+            return
+
+        copied = 0
+        if copy_from:
+            source = _find_department(copy_from)
+            if source is None:
+                await interaction.response.send_message(
+                    f"Отдел **{name}** создан, но источник лестницы не найден.", ephemeral=True
+                )
+                return
+            for rank in db.rank_ladder(int(source["id"])):
+                db.create_rank(
+                    name=str(rank["name"]),
+                    level=int(rank["level"]),
+                    min_score=int(rank["min_score"]),
+                    color=str(rank["color"]),
+                    description=str(rank["description"]),
+                    department_id=dept_id,
+                )
+                copied += 1
+
+        db.log_action(
+            interaction.user.id,
+            str(interaction.user),
+            "department.create",
+            target=name,
+            details=f"id={dept_id} · рангов={copied}",
+        )
+        await interaction.response.send_message(
+            f"✅ Отдел **{name}** создан"
+            + (f", скопировано ступеней: {copied}." if copy_from else ".")
+        )
+
+    @dept_group.command(name="edit", description="Изменить отдел")
+    @officer_only()
+    async def department_edit(
+        interaction: discord.Interaction,
+        department: str,
+        name: str | None = None,
+        description: str | None = None,
+        role: discord.Role | None = None,
+        color: str | None = None,
+    ) -> None:
+        found = _find_department(department)
+        if found is None:
+            await interaction.response.send_message("Отдел не найден.", ephemeral=True)
+            return
+        fields: dict[str, Any] = {}
+        if name:
+            fields["name"] = name
+        if description is not None:
+            fields["description"] = description
+        if role is not None:
+            fields["role_id"] = role.id
+        if color:
+            fields["color"] = color
+        if not fields:
+            await interaction.response.send_message("Нечего менять.", ephemeral=True)
+            return
+        try:
+            db.update_department(int(found["id"]), **fields)
+        except Exception as exc:  # noqa: BLE001
+            await interaction.response.send_message(f"⚠️ {exc}", ephemeral=True)
+            return
+        db.log_action(
+            interaction.user.id,
+            str(interaction.user),
+            "department.edit",
+            target=str(found["name"]),
+            details=", ".join(f"{k}={v}" for k, v in fields.items()),
+        )
+        await interaction.response.send_message(f"✅ Отдел **{found['name']}** обновлён.")
+
+    @dept_group.command(name="delete", description="Удалить отдел вместе с его лестницей")
+    @officer_only()
+    async def department_delete(interaction: discord.Interaction, department: str) -> None:
+        found = _find_department(department)
+        if found is None:
+            await interaction.response.send_message("Отдел не найден.", ephemeral=True)
+            return
+        db.delete_department(int(found["id"]))
+        db.log_action(
+            interaction.user.id,
+            str(interaction.user),
+            "department.delete",
+            target=str(found["name"]),
+        )
+        await interaction.response.send_message(
+            f"🗑️ Отдел **{found['name']}** удалён. Его участники остались без отдела."
+        )
+
+    @dept_group.command(name="assign", description="Зачислить участника в отдел")
+    @officer_only()
+    async def department_assign(
+        interaction: discord.Interaction, member: discord.Member, department: str
+    ) -> None:
+        found = _find_department(department)
+        if found is None:
+            await interaction.response.send_message("Отдел не найден.", ephemeral=True)
+            return
+        db.upsert_member(
+            member.id,
+            username=str(member),
+            display_name=member.display_name,
+            avatar=str(member.display_avatar.url),
+        )
+        await interaction.response.defer(ephemeral=True)
+        err = await core.set_member_department(
+            member.id, int(found["id"]), actor_of(interaction)
+        )
+        record = db.get_member_full(member.id)
+        rank_name = record["rank_name"] if record else None
+        msg = (
+            f"✅ {member.mention} → отдел **{found['name']}**"
+            + (f", ступень **{rank_name}**." if rank_name else ", лестница пуста.")
+        )
+        if err:
+            msg += f"\n⚠️ Роль на сервере: {err}"
+        await interaction.followup.send(msg, ephemeral=True)
+
+    bot.tree.add_command(dept_group)
+
+    # ------------------------------------------------------------------ /promote
+    @bot.tree.command(name="promote", description="Поднять участника на ступень выше в его отделе")
+    @officer_only()
+    @app_commands.describe(member="Участник", steps="На сколько ступеней поднять")
+    async def promote(
+        interaction: discord.Interaction, member: discord.Member, steps: int = 1
+    ) -> None:
+        await _move(interaction, member, 1, steps)
+
+    @bot.tree.command(name="demote", description="Опустить участника на ступень ниже в его отделе")
+    @officer_only()
+    @app_commands.describe(member="Участник", steps="На сколько ступеней опустить")
+    async def demote(
+        interaction: discord.Interaction, member: discord.Member, steps: int = 1
+    ) -> None:
+        await _move(interaction, member, -1, steps)
+
+    async def _move(
+        interaction: discord.Interaction,
+        member: discord.Member,
+        direction: int,
+        steps: int,
+    ) -> None:
+        db.upsert_member(
+            member.id,
+            username=str(member),
+            display_name=member.display_name,
+            avatar=str(member.display_avatar.url),
+        )
+        before = db.get_member_full(member.id)
+        await interaction.response.defer()
+        try:
+            rank, err = await core.move_member(
+                member.id, direction, steps, actor_of(interaction)
+            )
+        except ValueError as exc:
+            await interaction.followup.send(f"⚠️ {exc}", ephemeral=True)
+            return
+        if rank is None:
+            await interaction.followup.send(f"⚠️ {err}", ephemeral=True)
+            return
+        arrow = "🔼" if direction > 0 else "🔽"
+        embed = _embed(
+            f"{arrow} Перемещение по иерархии",
+            f"{member.mention} · отдел **{before['department_name'] or '—'}**\n"
+            f"{before['rank_name'] or 'без ранга'} → **{rank['name']}**",
+            color=_rank_color(rank),
+        )
+        if err:
+            embed.add_field(name="⚠️ Роль", value=err, inline=False)
+        await interaction.followup.send(embed=embed)
 
     # -------------------------------------------------------------------- /mark
     mark_group = app_commands.Group(name="mark", description="Отметки в личном деле")
@@ -393,11 +655,14 @@ def build_bot() -> FactionBot:
             await interaction.response.send_message("Личное дело не найдено.", ephemeral=True)
             return
         stats = db.mark_stats(target.id)
-        progress = core.ladder_progress(int(record["score"]), db.list_ranks())
+        dept_id = record["department_id"] or db.default_department_id()
+        ladder = db.rank_ladder(dept_id)[::-1] if dept_id else db.list_ranks()
+        progress = core.ladder_progress(int(record["score"]), ladder)
         embed_color = _rank_color(record, "rank_color")
         embed = _embed(
             f"Личное дело — {record['display_name']}",
-            f"Ранг: **{record['rank_name'] or 'без ранга'}**\n"
+            (f"Отдел: **{record['department_name']}**\n" if record["department_name"] else "")
+            + f"Ранг: **{record['rank_name'] or 'без ранга'}**\n"
             f"Счёт: **{record['score']}** · 🟢 {stats['positive']} · 🔴 {stats['negative']} · ⚪ {stats['neutral']}",
             color=embed_color,
         )
@@ -480,16 +745,38 @@ def build_bot() -> FactionBot:
 
 
 def _find_rank(query: str) -> Any:
-    query_norm = query.strip().lower()
-    ranks = db.list_ranks()
+    """Resolve a rank by name, id, or 'Отдел: Ранг' when names repeat per department."""
+    raw = query.strip()
+    department: Any = None
+    if ":" in raw:
+        dept_part, _, rank_part = raw.partition(":")
+        department = _find_department(dept_part)
+        if department is not None:
+            raw = rank_part.strip()
+    query_norm = raw.lower()
+    ranks = db.list_ranks(int(department["id"])) if department is not None else db.list_ranks()
     for r in ranks:
         if str(r["name"]).lower() == query_norm:
             return r
-    if query.strip().isdigit():
-        return db.get_rank(int(query.strip()))
+    if raw.isdigit():
+        return db.get_rank(int(raw))
     for r in ranks:
         if query_norm in str(r["name"]).lower():
             return r
+    return None
+
+
+def _find_department(query: str) -> Any:
+    query_norm = query.strip().lower()
+    departments = db.list_departments()
+    for d in departments:
+        if str(d["name"]).lower() == query_norm:
+            return d
+    if query.strip().isdigit():
+        return db.get_department(int(query.strip()))
+    for d in departments:
+        if query_norm in str(d["name"]).lower():
+            return d
     return None
 
 

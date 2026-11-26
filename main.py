@@ -263,7 +263,8 @@ async def index(request: Request):
     officer = _is_officer(payload)
 
     me = db.get_member_full(user.discord_id)
-    ranks = db.list_ranks()
+    dept_id = (me["department_id"] if me else None) or db.default_department_id()
+    ranks = db.rank_ladder(dept_id)[::-1] if dept_id else db.list_ranks()
     return _render(
         request,
         "index.html",
@@ -290,7 +291,7 @@ async def my_file(request: Request):
 
 # --------------------------------------------------------------------- members
 @app.get("/members", response_class=HTMLResponse)
-async def members(request: Request, q: str = "", rank: str = ""):
+async def members(request: Request, q: str = "", rank: str = "", department: str = ""):
     payload, user = _current(request)
     if user is None:
         return RedirectResponse("/login", status_code=303)
@@ -298,16 +299,19 @@ async def members(request: Request, q: str = "", rank: str = ""):
         raise HTTPException(status_code=403)
 
     rank_id = int(rank) if rank.isdigit() else None
-    rows = db.list_members(search=q.strip(), rank_id=rank_id)
+    dept_id = int(department) if department.isdigit() else None
+    rows = db.list_members(search=q.strip(), rank_id=rank_id, department_id=dept_id)
     return _render(
         request,
         "members.html",
         user=user,
         officer=True,
         members=rows,
-        ranks=db.list_ranks(),
+        ranks=db.list_ranks(dept_id),
+        departments=db.list_departments(),
         q=q,
         selected_rank=rank,
+        selected_department=department,
     )
 
 
@@ -327,7 +331,8 @@ async def member_file(request: Request, discord_id: int):
     if row is None:
         raise HTTPException(status_code=404)
 
-    ranks = db.list_ranks()
+    dept_id = row["department_id"] or db.default_department_id()
+    ranks = db.rank_ladder(dept_id)[::-1] if dept_id else db.list_ranks()
     return _render(
         request,
         "member.html",
@@ -340,6 +345,8 @@ async def member_file(request: Request, discord_id: int):
         progress=core.ladder_progress(int(row["score"]), ranks),
         presets=db.list_presets(),
         is_self=int(row["discord_id"]) == user.discord_id,
+        departments=db.list_departments(),
+        ladder=db.rank_ladder(dept_id)[::-1] if dept_id else [],
     )
 
 
@@ -421,6 +428,64 @@ async def set_rank(
     return _redirect_with_flash(f"/members/{discord_id}", notice)
 
 
+@app.post("/members/{discord_id}/move")
+async def move_rank(
+    request: Request,
+    discord_id: int,
+    csrf_token: str = Form(""),
+    direction: str = Form("up"),
+    steps: str = Form("1"),
+):
+    payload, user = _current(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not _is_officer(payload):
+        raise HTTPException(status_code=403)
+    if not _csrf_ok(request, csrf_token):
+        raise HTTPException(status_code=400, detail="CSRF")
+
+    sign = -1 if direction == "down" else 1
+    count = int(steps) if steps.strip().isdigit() else 1
+    try:
+        rank, err = await core.move_member(
+            discord_id, sign, count, _actor(user)
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    if rank is None:
+        return _redirect_with_flash(f"/members/{discord_id}", err)
+    notice = f"Ступень: {rank['name']}"
+    if err:
+        notice += f" (роль в Discord не обновлена: {err})"
+    return _redirect_with_flash(f"/members/{discord_id}", notice)
+
+
+@app.post("/members/{discord_id}/department")
+async def set_department(
+    request: Request,
+    discord_id: int,
+    csrf_token: str = Form(""),
+    department_id: str = Form(""),
+):
+    payload, user = _current(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not _is_officer(payload):
+        raise HTTPException(status_code=403)
+    if not _csrf_ok(request, csrf_token):
+        raise HTTPException(status_code=400, detail="CSRF")
+
+    did = int(department_id) if department_id.strip().isdigit() else None
+    try:
+        err = await core.set_member_department(discord_id, did, _actor(user))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    notice = "Отдел обновлён"
+    if err:
+        notice += f", но роль в Discord не обновлена: {err}"
+    return _redirect_with_flash(f"/members/{discord_id}", notice)
+
+
 @app.post("/members/{discord_id}/profile")
 async def update_profile(
     request: Request,
@@ -453,6 +518,145 @@ async def update_profile(
 
 
 # ------------------------------------------------------------------------ ranks
+@app.get("/departments", response_class=HTMLResponse)
+async def departments_page(request: Request):
+    payload, user = _current(request)
+    if user is None:
+        return RedirectResponse("/login", status_code=303)
+    if not _is_officer(payload):
+        raise HTTPException(status_code=403)
+    departments = db.list_departments()
+    ladders = {
+        int(d["id"]): db.rank_ladder(int(d["id"])) for d in departments
+    }
+    return _render(
+        request,
+        "departments.html",
+        user=user,
+        officer=True,
+        departments=departments,
+        ladders=ladders,
+        counts=db.department_rank_rows(),
+        default_department=db.default_department_id(),
+    )
+
+
+@app.post("/departments")
+async def department_create(
+    request: Request,
+    csrf_token: str = Form(""),
+    name: str = Form(""),
+    description: str = Form(""),
+    color: str = Form("#5865f2"),
+    role_id: str = Form(""),
+    copy_from: str = Form(""),
+):
+    payload, user = _current(request)
+    if user is None or not _is_officer(payload):
+        raise HTTPException(status_code=403)
+    if not _csrf_ok(request, csrf_token):
+        raise HTTPException(status_code=400, detail="CSRF")
+    if not name.strip():
+        raise HTTPException(status_code=400, detail="Название обязательно")
+    try:
+        dept_id = db.create_department(
+            name=name.strip()[:80],
+            description=description[:300],
+            color=color if color.startswith("#") else f"#{color}",
+            role_id=int(role_id) if role_id.strip().isdigit() else None,
+        )
+    except Exception as exc:  # noqa: BLE001 - unique name constraint
+        raise HTTPException(status_code=400, detail=f"Не удалось создать отдел: {exc}") from exc
+
+    source_id = int(copy_from) if copy_from.strip().isdigit() else None
+    if source_id is not None and db.get_department(source_id) is not None:
+        for rank in db.rank_ladder(source_id):
+            db.create_rank(
+                name=str(rank["name"]),
+                level=int(rank["level"]),
+                min_score=int(rank["min_score"]),
+                color=str(rank["color"]),
+                description=str(rank["description"]),
+                department_id=dept_id,
+            )
+
+    db.log_action(
+        user.discord_id,
+        user.display_name or user.username,
+        "department.create",
+        target=name.strip(),
+        details=f"id={dept_id}",
+    )
+    return RedirectResponse("/departments", status_code=303)
+
+
+@app.post("/departments/{department_id}")
+async def department_edit(
+    request: Request,
+    department_id: int,
+    csrf_token: str = Form(""),
+    name: str = Form(""),
+    description: str = Form(""),
+    color: str = Form("#5865f2"),
+    role_id: str = Form(""),
+):
+    payload, user = _current(request)
+    if user is None or not _is_officer(payload):
+        raise HTTPException(status_code=403)
+    if not _csrf_ok(request, csrf_token):
+        raise HTTPException(status_code=400, detail="CSRF")
+    if db.get_department(department_id) is None:
+        raise HTTPException(status_code=404)
+    try:
+        db.update_department(
+            department_id,
+            name=name.strip()[:80],
+            description=description[:300],
+            color=color if color.startswith("#") else f"#{color}",
+            role_id=int(role_id) if role_id.strip().isdigit() else None,
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"Не удалось сохранить: {exc}") from exc
+    db.log_action(
+        user.discord_id,
+        user.display_name or user.username,
+        "department.edit",
+        target=str(department_id),
+    )
+    return RedirectResponse("/departments", status_code=303)
+
+
+@app.post("/departments/{department_id}/delete")
+async def department_delete(request: Request, department_id: int, csrf_token: str = Form("")):
+    payload, user = _current(request)
+    if user is None or not _is_officer(payload):
+        raise HTTPException(status_code=403)
+    if not _csrf_ok(request, csrf_token):
+        raise HTTPException(status_code=400, detail="CSRF")
+    dept = db.get_department(department_id)
+    db.delete_department(department_id)
+    db.log_action(
+        user.discord_id,
+        user.display_name or user.username,
+        "department.delete",
+        target=str(dept["name"]) if dept else str(department_id),
+    )
+    return RedirectResponse("/departments", status_code=303)
+
+
+@app.post("/departments/{department_id}/default")
+async def department_default(request: Request, department_id: int, csrf_token: str = Form("")):
+    payload, user = _current(request)
+    if user is None or not _is_officer(payload):
+        raise HTTPException(status_code=403)
+    if not _csrf_ok(request, csrf_token):
+        raise HTTPException(status_code=400, detail="CSRF")
+    if db.get_department(department_id) is None:
+        raise HTTPException(status_code=404)
+    db.set_setting("default_department_id", str(department_id))
+    return RedirectResponse("/departments", status_code=303)
+
+
 @app.get("/ranks", response_class=HTMLResponse)
 async def ranks_page(request: Request):
     payload, user = _current(request)
@@ -466,6 +670,7 @@ async def ranks_page(request: Request):
         user=user,
         officer=True,
         ranks=db.list_ranks(),
+        departments=db.list_departments(),
         counts=db.member_rank_rows(),
         auto_rank=core.auto_rank_enabled(),
         presets=db.list_presets(),
@@ -482,6 +687,7 @@ async def rank_create(
     min_score: str = Form("0"),
     color: str = Form("#6b7280"),
     description: str = Form(""),
+    department_id: str = Form(""),
 ):
     payload, user = _current(request)
     if user is None or not _is_officer(payload):
@@ -498,6 +704,11 @@ async def rank_create(
             min_score=int(min_score or 0),
             color=color if color.startswith("#") else f"#{color}",
             description=description[:300],
+            department_id=(
+                int(department_id)
+                if department_id.strip().isdigit()
+                else db.default_department_id()
+            ),
         )
     except Exception as exc:  # noqa: BLE001 - unique name constraint
         raise HTTPException(status_code=400, detail=f"Не удалось создать ранг: {exc}") from exc
@@ -516,6 +727,7 @@ async def rank_edit(
     min_score: str = Form("0"),
     color: str = Form("#6b7280"),
     description: str = Form(""),
+    department_id: str = Form(""),
 ):
     payload, user = _current(request)
     if user is None or not _is_officer(payload):
@@ -533,6 +745,9 @@ async def rank_edit(
             min_score=int(min_score or 0),
             color=color if color.startswith("#") else f"#{color}",
             description=description[:300],
+            department_id=(
+                int(department_id) if department_id.strip().isdigit() else None
+            ),
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"Не удалось сохранить: {exc}") from exc

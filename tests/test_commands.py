@@ -7,7 +7,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-os.environ["DB_PATH"] = str(Path(__file__).resolve().parents[1] / "data" / "test_cmds.db")
+DB_FILE = Path(__file__).resolve().parents[1] / "data" / "test_cmds.db"
+for _suffix in ("", "-wal", "-shm"):
+    Path(str(DB_FILE) + _suffix).unlink(missing_ok=True)
+os.environ["DB_PATH"] = str(DB_FILE)
 os.environ.setdefault("BASE_URL", "http://localhost:8000")
 os.environ.setdefault("SESSION_SECRET", "test-secret")
 
@@ -227,6 +230,91 @@ async def main() -> None:
     await command(b, "rank delete").callback(i, rank="Лейтенант")
     check("rank deleted", db.get_rank(created["id"]) is None)
     check("delete confirms", "удалён" in (i.response.sent[0]["content"] or ""))
+
+    # ---- /department create + assign + movement
+    i = FakeInteraction(officer, guild)
+    await command(b, "department create").callback(
+        i, name="Разведка", description="Глаза фракции", role=None, color="#22d3ee", copy_from=None
+    )
+    check("department created", "Разведка" in (i.response.sent[0]["content"] or ""))
+    recon = next((d for d in db.list_departments() if d["name"] == "Разведка"), None)
+    check("department in db", recon is not None)
+
+    # empty ladder: a fresh department has no rungs to climb
+    db.upsert_member(7007, username="scout#1", display_name="Разведчик")
+    i = FakeInteraction(officer, guild)
+    await command(b, "department assign").callback(
+        i, member=FakeUser(7007, "Разведчик"), department="Разведка"
+    )
+    check("assign deferred", i.response.deferred)
+    check("member in department", db.get_member(7007)["department_id"] == recon["id"])
+    check("assign confirms empties ladder", "пуста" in (i.followup.sent[0]["content"] or ""))
+
+    # build a ladder in the new department, independent from the main one
+    db.create_rank(name="Новобранец", level=0, min_score=0, department_id=int(recon["id"]))
+    db.create_rank(name="Следопыт", level=1, min_score=10, department_id=int(recon["id"]))
+    db.create_rank(name="Глава разведки", level=2, min_score=30, department_id=int(recon["id"]))
+
+    i = FakeInteraction(officer, guild)
+    await command(b, "promote").callback(i, member=FakeUser(7007, "Разведчик"), steps=1)
+    check("promote deferred", i.response.deferred)
+    check("promoted to first rung", db.get_member_full(7007)["rank_name"] == "Новобранец",
+          str(db.get_member_full(7007)["rank_name"]))
+    check("promote embed names rung", "Новобранец" in (i.followup.sent[0]["embed"].description or ""))
+
+    i = FakeInteraction(officer, guild)
+    await command(b, "promote").callback(i, member=FakeUser(7007, "Разведчик"), steps=2)
+    check("multi-step promote", db.get_member_full(7007)["rank_name"] == "Глава разведки",
+          str(db.get_member_full(7007)["rank_name"]))
+
+    # top of the ladder: no further movement
+    i = FakeInteraction(officer, guild)
+    await command(b, "promote").callback(i, member=FakeUser(7007, "Разведчик"), steps=1)
+    check("top rung blocks promote", "некуда" in (i.followup.sent[0]["content"] or ""))
+
+    i = FakeInteraction(officer, guild)
+    await command(b, "demote").callback(i, member=FakeUser(7007, "Разведчик"), steps=1)
+    check("demote works", db.get_member_full(7007)["rank_name"] == "Следопыт",
+          str(db.get_member_full(7007)["rank_name"]))
+
+    # ladder does not leak between departments
+    i = FakeInteraction(officer, guild)
+    await command(b, "promote").callback(i, member=FakeUser(7007, "Разведчик"), steps=5)
+    check("clamped at top", db.get_member_full(7007)["rank_name"] == "Глава разведки",
+          str(db.get_member_full(7007)["rank_name"]))
+    check("did not take a main-ladder rank",
+          db.get_member_full(7007)["rank_name"] not in ("Командир", "Офицер"))
+
+    # /department list renders all departments with rungs
+    i = FakeInteraction(plain, guild)
+    await command(b, "department list").callback(i)
+    embed = i.response.sent[0]["embed"]
+    names = " ".join(f.name for f in embed.fields)
+    check("department list shows recon", "Разведка" in names, names)
+
+    # /rank list scoped to one department
+    i = FakeInteraction(plain, guild)
+    await command(b, "rank list").callback(i, department="Разведка")
+    embed = i.response.sent[0]["embed"]
+    values = " ".join(f.name + " " + (f.value or "") for f in embed.fields)
+    check("scoped rank list has recon rung", "Следопыт" in values, values)
+    check("scoped rank list hides main rung", "Командир" not in values, values)
+
+    # /rank create into a specific department
+    i = FakeInteraction(officer, guild)
+    await command(b, "rank create").callback(
+        i, name="Аналитик", role=None, level=1, min_score=15, color="#38bdf8",
+        department="Разведка",
+    )
+    analyst = next((r for r in db.list_ranks(int(recon["id"])) if r["name"] == "Аналитик"), None)
+    check("rank created in department", analyst is not None)
+    check("create confirms department", "Разведка" in (i.response.sent[0]["content"] or ""))
+
+    # /department delete drops the ladder and frees the members
+    i = FakeInteraction(officer, guild)
+    await command(b, "department delete").callback(i, department="Разведка")
+    check("department deleted", db.get_department(int(recon["id"])) is None)
+    check("members freed", db.get_member(7007)["department_id"] is None)
 
     print()
     print("FAILURES:", failures if failures else "none")

@@ -8,6 +8,7 @@
       <h1>{{ m.display_name }}</h1>
       <p class="muted">
         {{ m.username }} · ID {{ m.discord_id }}
+        {% if m.department_name %}· <span style="color: {{ m.department_color }}">{{ m.department_name }}</span>{% endif %}
         {% if m.rank_name %}· <span style="color: {{ m.rank_color }}">{{ m.rank_name }}</span>{% endif %}
       </p>
     </div>
@@ -24,7 +25,9 @@
   <section class="card stat-card">
     <span class="label">Ранг</span>
     <span class="big" style="color: {{ m.rank_color or '#e5e7eb' }}">{{ m.rank_name or 'без ранга' }}</span>
-    <span class="muted small">уровень {{ m.rank_level if m.rank_level is not none else '—' }}</span>
+    <span class="muted small">
+      {% if m.department_name %}отдел {{ m.department_name }} · {% endif %}уровень {{ m.rank_level if m.rank_level is not none else '—' }}
+    </span>
   </section>
   <section class="card stat-card">
     <span class="label">В системе с</span>
@@ -45,6 +48,33 @@
 <section class="card">
   <h2>Примечание офицера</h2>
   <p class="pre">{{ m.note }}</p>
+</section>
+{% endif %}
+
+{% if officer and ladder %}
+<section class="card">
+  <h2>Иерархия отдела{% if m.department_name %} — {{ m.department_name }}{% endif %}</h2>
+  <div class="rungs">
+    {% for r in ladder %}
+      <div class="rung {% if m.rank_id == r.id %}rung-on{% endif %}">
+        <span class="chip" style="--c: {{ r.color }}">{{ r.name }}</span>
+        <span class="muted tiny">ур. {{ r.level }} · от {{ r.min_score }}</span>
+        {% if m.rank_id == r.id %}<span class="badge">сейчас</span>{% endif %}
+      </div>
+    {% endfor %}
+  </div>
+  <div class="row mt">
+    <form method="post" action="/members/{{ m.discord_id }}/move">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <input type="hidden" name="direction" value="down">
+      <button class="btn ghost" type="submit">▼ ступень ниже</button>
+    </form>
+    <form method="post" action="/members/{{ m.discord_id }}/move">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <input type="hidden" name="direction" value="up">
+      <button class="btn" type="submit">▲ ступень выше</button>
+    </form>
+  </div>
 </section>
 {% endif %}
 
@@ -79,9 +109,22 @@
 
   <section class="card">
     <h2>Ранг и профиль</h2>
+    <form method="post" action="/members/{{ m.discord_id }}/department" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label>Отдел
+        <select name="department_id">
+          <option value="">— без отдела —</option>
+          {% for d in departments %}
+            <option value="{{ d.id }}" {% if m.department_id == d.id %}selected{% endif %}>{{ d.name }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button class="btn ghost" type="submit">Перевести в отдел</button>
+    </form>
+
     <form method="post" action="/members/{{ m.discord_id }}/rank" class="stack">
       <input type="hidden" name="csrf_token" value="{{ csrf }}">
-      <label>Ранг вручную
+      <label>Ступень в отделе
         <select name="rank_id">
           <option value="">— без ранга —</option>
           {% for r in ranks %}

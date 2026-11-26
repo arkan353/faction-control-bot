@@ -16,13 +16,19 @@
       <option value="{{ r.id }}" {% if selected_rank == r.id|string %}selected{% endif %}>{{ r.name }}</option>
     {% endfor %}
   </select>
+  <select name="department">
+    <option value="">Все отделы</option>
+    {% for d in departments %}
+      <option value="{{ d.id }}" {% if selected_department == d.id|string %}selected{% endif %}>{{ d.name }}</option>
+    {% endfor %}
+  </select>
   <button class="btn ghost" type="submit">Найти</button>
 </form>
 
 <section class="card">
   {% if members %}
   <table>
-    <thead><tr><th>Участник</th><th>Ранг</th><th>Очки</th><th>Позывной</th><th>В системе</th></tr></thead>
+    <thead><tr><th>Участник</th><th>Отдел</th><th>Ступень</th><th>Очки</th><th>Позывной</th><th>В системе</th></tr></thead>
     <tbody>
     {% for u in members %}
       <tr>
@@ -32,6 +38,7 @@
             <span>{{ u.display_name }}</span>
           </a>
         </td>
+        <td class="muted small">{{ u.department_name or '—' }}</td>
         <td style="color: {{ u.rank_color or '#9ca3af' }}">{{ u.rank_name or '—' }}</td>
         <td>{{ u.score }}</td>
         <td class="muted small">{{ u.callsign or '—' }}</td>

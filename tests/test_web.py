@@ -6,7 +6,12 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+DB_FILE = Path(__file__).resolve().parents[1] / "data" / "test_web.db"
+for _suffix in ("", "-wal", "-shm"):
+    Path(str(DB_FILE) + _suffix).unlink(missing_ok=True)
+os.environ["DB_PATH"] = str(DB_FILE)
 os.environ.setdefault("BASE_URL", "http://localhost:8000")
+os.environ.setdefault("SESSION_SECRET", "test-secret")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -140,6 +145,112 @@ check("member /ranks forbidden", r.status_code == 403, str(r.status_code))
 # health
 r = client.get("/health")
 check("health ok", r.status_code == 200 and r.json()["status"] == "ok")
+
+# ---------------------------------------------------------------- departments
+session_for(1001, True, "Офицер Тест")
+r = client.get("/departments")
+check("officer /departments 200", r.status_code == 200, str(r.status_code))
+check("departments page lists seed dept", "Основной состав" in r.text)
+
+r = client.post(
+    "/departments",
+    data={
+        "csrf_token": "testcsrf",
+        "name": "Отдел кадров",
+        "description": "Кадры",
+        "color": "#22d3ee",
+        "role_id": "",
+        "copy_from": "",
+    },
+    follow_redirects=False,
+)
+check("create department redirects", r.status_code == 303, str(r.status_code))
+dept = next((d for d in db.list_departments() if d["name"] == "Отдел кадров"), None)
+check("department in db", dept is not None)
+
+r = client.post(
+    "/departments",
+    data={
+        "csrf_token": "testcsrf",
+        "name": "Резерв",
+        "color": "#f59e0b",
+        "copy_from": str(dept["id"]),
+    },
+    follow_redirects=False,
+)
+check("clone department redirects", r.status_code == 303, str(r.status_code))
+
+r = client.post(
+    f"/departments/{dept['id']}/delete",
+    data={"csrf_token": "testcsrf"},
+    follow_redirects=False,
+)
+check("delete department redirects", r.status_code == 303, str(r.status_code))
+check("department gone", db.get_department(int(dept["id"])) is None)
+
+# a rank created through the form lands in the chosen department
+dept = next(d for d in db.list_departments() if d["name"] == "Резерв")
+check("clone copied nothing from empty ladder", dept["rank_count"] == 0)
+r = client.post(
+    "/ranks",
+    data={
+        "csrf_token": "testcsrf",
+        "name": "Стажёр",
+        "role_id": "",
+        "level": "0",
+        "min_score": "0",
+        "color": "#999999",
+        "description": "",
+        "department_id": str(dept["id"]),
+    },
+    follow_redirects=False,
+)
+check("create rank in department", r.status_code == 303, str(r.status_code))
+intern = next((x for x in db.list_ranks(int(dept["id"])) if x["name"] == "Стажёр"), None)
+check("rank bound to department", intern is not None, str([x["name"] for x in db.list_ranks()]))
+
+# move a member through the department ladder
+client.post(
+    "/ranks",
+    data={
+        "csrf_token": "testcsrf",
+        "name": "Мастер",
+        "role_id": "",
+        "level": "1",
+        "min_score": "50",
+        "color": "#22c55e",
+        "description": "",
+        "department_id": str(dept["id"]),
+    },
+    follow_redirects=False,
+)
+r = client.post(
+    "/members/2002/department",
+    data={"csrf_token": "testcsrf", "department_id": str(dept["id"])},
+    follow_redirects=False,
+)
+check("assign department redirects", r.status_code == 303, str(r.status_code))
+check("member has department", db.get_member(2002)["department_id"] == dept["id"])
+
+r = client.post(
+    "/members/2002/move",
+    data={"csrf_token": "testcsrf", "direction": "up"},
+    follow_redirects=False,
+)
+check("move up redirects", r.status_code == 303, str(r.status_code))
+check(
+    "member climbed ladder",
+    db.get_member_full(2002)["rank_name"] in ("Стажёр", "Мастер"),
+    str(db.get_member_full(2002)["rank_name"]),
+)
+
+r = client.get("/members/2002")
+check("dossier shows department", "Резерв" in r.text)
+
+# plain member cannot use department admin
+session_for(3003, False, "Рядовой")
+r = client.get("/departments", follow_redirects=False)
+check("member /departments forbidden", r.status_code == 403, str(r.status_code))
 
 print()
 print("FAILURES:", failures if failures else "none")

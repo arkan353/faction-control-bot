@@ -13,15 +13,26 @@ SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
+CREATE TABLE IF NOT EXISTS departments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL UNIQUE,
+    description TEXT    NOT NULL DEFAULT '',
+    color       TEXT    NOT NULL DEFAULT '#5865f2',
+    role_id     INTEGER,
+    created_at  INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS ranks (
-    id           INTEGER PRIMARY KEY AUTOINCREMENT,
-    name         TEXT    NOT NULL UNIQUE,
-    role_id      INTEGER,
-    level        INTEGER NOT NULL DEFAULT 0,
-    min_score    INTEGER NOT NULL DEFAULT 0,
-    color        TEXT    NOT NULL DEFAULT '#6b7280',
-    description  TEXT    NOT NULL DEFAULT '',
-    created_at   INTEGER NOT NULL
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT    NOT NULL,
+    role_id       INTEGER,
+    level         INTEGER NOT NULL DEFAULT 0,
+    min_score     INTEGER NOT NULL DEFAULT 0,
+    color         TEXT    NOT NULL DEFAULT '#6b7280',
+    description   TEXT    NOT NULL DEFAULT '',
+    department_id INTEGER REFERENCES departments(id) ON DELETE CASCADE,
+    created_at    INTEGER NOT NULL,
+    UNIQUE(department_id, name)
 );
 
 CREATE TABLE IF NOT EXISTS members (
@@ -30,6 +41,7 @@ CREATE TABLE IF NOT EXISTS members (
     display_name   TEXT NOT NULL DEFAULT '',
     avatar         TEXT NOT NULL DEFAULT '',
     rank_id        INTEGER REFERENCES ranks(id) ON DELETE SET NULL,
+    department_id  INTEGER REFERENCES departments(id) ON DELETE SET NULL,
     score          INTEGER NOT NULL DEFAULT 0,
     callsign       TEXT NOT NULL DEFAULT '',
     note           TEXT NOT NULL DEFAULT '',
@@ -77,6 +89,28 @@ CREATE TABLE IF NOT EXISTS marker_presets (
 );
 """
 
+# Indexes that rely on columns added by the department migration.
+INDEXES = """
+CREATE INDEX IF NOT EXISTS idx_ranks_dept ON ranks(department_id);
+CREATE INDEX IF NOT EXISTS idx_members_dept ON members(department_id);
+"""
+
+# Rebuilt ranks table for databases created before departments existed.
+RANKS_V2 = """
+CREATE TABLE ranks_new (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    name          TEXT    NOT NULL,
+    role_id       INTEGER,
+    level         INTEGER NOT NULL DEFAULT 0,
+    min_score     INTEGER NOT NULL DEFAULT 0,
+    color         TEXT    NOT NULL DEFAULT '#6b7280',
+    description   TEXT    NOT NULL DEFAULT '',
+    department_id INTEGER REFERENCES departments(id) ON DELETE CASCADE,
+    created_at    INTEGER NOT NULL,
+    UNIQUE(department_id, name)
+);
+"""
+
 DEFAULT_PRESETS = [
     ("Поощрение", 5),
     ("Отличная служба", 10),
@@ -92,6 +126,8 @@ DEFAULT_RANKS = [
     ("Офицер", 3, 40, "#fbbf24"),
     ("Командир", 4, 80, "#f87171"),
 ]
+
+DEFAULT_DEPARTMENT = ("Основной состав", "Общая иерархия фракции", "#5865f2")
 
 
 @dataclass
@@ -128,15 +164,197 @@ def connect() -> Iterator[sqlite3.Connection]:
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+    _migrate_departments()
+    with connect() as conn:
+        conn.executescript(INDEXES)
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate_departments() -> None:
+    """Bring databases created before departments up to the current schema.
+
+    Rebuilding a table needs foreign keys off, otherwise dropping the legacy
+    ranks table would null out every member's rank through ON DELETE SET NULL.
+    SCHEMA itself re-enables them, so the pragma is applied again right before
+    the rebuild.
+    """
+    conn = sqlite3.connect(DB_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.executescript(SCHEMA)
+        conn.execute("PRAGMA foreign_keys=OFF")
+        if conn.execute("PRAGMA foreign_keys").fetchone()[0]:
+            raise RuntimeError("Не удалось отключить внешние ключи для миграции отделов")
+        ranks_cols = _columns(conn, "ranks")
+        members_cols = _columns(conn, "members")
+
+        rank_count = int(conn.execute("SELECT COUNT(*) AS c FROM ranks").fetchone()["c"])
+        dept_count = int(conn.execute("SELECT COUNT(*) AS c FROM departments").fetchone()["c"])
+
+        legacy_ranks = "department_id" not in ranks_cols
+        legacy_members = "department_id" not in members_cols
+        if not legacy_ranks and not legacy_members:
+            conn.execute("PRAGMA foreign_keys=ON")
+            return
+
+        conn.execute("BEGIN")
+        default_dept: int | None = None
+        if dept_count == 0 and rank_count > 0:
+            cur = conn.execute(
+                "INSERT INTO departments(name, description, color, created_at) VALUES(?,?,?,?)",
+                (*DEFAULT_DEPARTMENT, now()),
+            )
+            default_dept = int(cur.lastrowid)
+        elif dept_count:
+            row = conn.execute("SELECT id FROM departments ORDER BY id LIMIT 1").fetchone()
+            default_dept = int(row["id"])
+
+        if legacy_ranks:
+            orphaned = conn.execute(
+                "SELECT COUNT(*) AS c FROM members m WHERE m.rank_id IS NOT NULL"
+                " AND NOT EXISTS (SELECT 1 FROM ranks r WHERE r.id = m.rank_id)"
+            ).fetchone()["c"]
+            if orphaned:
+                raise RuntimeError(f"В базе {orphaned} участник(ов) ссылаются на несуществующий ранг")
+            conn.executescript(RANKS_V2)
+            conn.execute(
+                "INSERT INTO ranks_new(id, name, role_id, level, min_score, color,"
+                " description, department_id, created_at)"
+                " SELECT id, name, role_id, level, min_score, color, description, ?, created_at"
+                " FROM ranks",
+                (default_dept,),
+            )
+            conn.execute("DROP TABLE ranks")
+            conn.execute("ALTER TABLE ranks_new RENAME TO ranks")
+            lost = conn.execute(
+                "SELECT COUNT(*) AS c FROM members m WHERE m.rank_id IS NOT NULL"
+                " AND NOT EXISTS (SELECT 1 FROM ranks r WHERE r.id = m.rank_id)"
+            ).fetchone()["c"]
+            if lost:
+                raise RuntimeError(f"Пересборка рангов потеряла {lost} привязок участников")
+
+        if legacy_members:
+            conn.execute(
+                "ALTER TABLE members ADD COLUMN department_id INTEGER"
+                " REFERENCES departments(id) ON DELETE SET NULL"
+            )
+            if default_dept is not None:
+                conn.execute(
+                    "UPDATE members SET department_id=? WHERE department_id IS NULL",
+                    (default_dept,),
+                )
+
+        if default_dept is not None and not db_setting_exists(conn, "default_department_id"):
+            conn.execute(
+                "INSERT INTO settings(key, value) VALUES('default_department_id', ?)",
+                (str(default_dept),),
+            )
+
+        conn.commit()
+        broken = conn.execute("PRAGMA foreign_key_check").fetchall()
+        if broken:
+            raise RuntimeError(f"Миграция отделов нарушила ссылки: {broken[:3]}")
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.close()
+
+
+def db_setting_exists(conn: sqlite3.Connection, key: str) -> bool:
+    return conn.execute("SELECT 1 FROM settings WHERE key=?", (key,)).fetchone() is not None
+
+
+# --------------------------------------------------------------------- departments
+def list_departments() -> list[sqlite3.Row]:
+    with connect() as conn:
+        return conn.execute(
+            "SELECT d.*,"
+            " (SELECT COUNT(*) FROM ranks r WHERE r.department_id = d.id) AS rank_count,"
+            " (SELECT COUNT(*) FROM members m WHERE m.department_id = d.id) AS member_count"
+            " FROM departments d ORDER BY d.name COLLATE NOCASE"
+        ).fetchall()
+
+
+def get_department(department_id: int) -> sqlite3.Row | None:
+    with connect() as conn:
+        return conn.execute(
+            "SELECT * FROM departments WHERE id=?", (department_id,)
+        ).fetchone()
+
+
+def default_department_id() -> int | None:
+    """Ladder used by members who have no department of their own."""
+    raw = get_setting("default_department_id", "")
+    if raw.isdigit() and get_department(int(raw)) is not None:
+        return int(raw)
+    with connect() as conn:
+        row = conn.execute("SELECT id FROM departments ORDER BY id LIMIT 1").fetchone()
+    return int(row["id"]) if row else None
+
+
+def create_department(
+    name: str,
+    description: str = "",
+    color: str = "#5865f2",
+    role_id: int | None = None,
+) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO departments(name, description, color, role_id, created_at)"
+            " VALUES(?,?,?,?,?)",
+            (name.strip(), description.strip(), color, role_id, now()),
+        )
+        return int(cur.lastrowid)
+
+
+def update_department(department_id: int, **fields: Any) -> None:
+    allowed = {"name", "description", "color", "role_id"}
+    sets, values = [], []
+    for key, value in fields.items():
+        if key not in allowed:
+            continue
+        sets.append(f"{key}=?")
+        values.append(value)
+    if not sets:
+        return
+    values.append(department_id)
+    with connect() as conn:
+        conn.execute(f"UPDATE departments SET {', '.join(sets)} WHERE id=?", values)
+
+
+def delete_department(department_id: int) -> None:
+    """Drop the department with its rank ladder; members fall back to no department."""
+    with connect() as conn:
+        conn.execute("UPDATE members SET department_id=NULL WHERE department_id=?", (department_id,))
+        conn.execute("DELETE FROM departments WHERE id=?", (department_id,))
+    if get_setting("default_department_id", "") == str(department_id):
+        set_setting("default_department_id", "")
+
+
+def department_member_rows() -> dict[str, int]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT COALESCE(department_id, 0) AS did, COUNT(*) AS c FROM members GROUP BY did"
+        ).fetchall()
+    return {str(r["did"]): int(r["c"]) for r in rows}
 
 
 # --------------------------------------------------------------------------- ranks
-def list_ranks() -> list[sqlite3.Row]:
-    """Highest rank first (level descending)."""
+def list_ranks(department_id: int | None = None) -> list[sqlite3.Row]:
+    """Highest rank first (level descending), optionally within one department."""
+    sql = (
+        "SELECT r.*, d.name AS department_name, d.color AS department_color"
+        " FROM ranks r LEFT JOIN departments d ON d.id = r.department_id"
+    )
+    params: list[Any] = []
+    if department_id is not None:
+        sql += " WHERE r.department_id = ?"
+        params.append(department_id)
+    sql += " ORDER BY d.name COLLATE NOCASE, r.level DESC, r.min_score DESC, r.name COLLATE NOCASE"
     with connect() as conn:
-        return conn.execute(
-            "SELECT * FROM ranks ORDER BY level DESC, min_score DESC, name COLLATE NOCASE"
-        ).fetchall()
+        return conn.execute(sql, params).fetchall()
 
 
 def get_rank(rank_id: int) -> sqlite3.Row | None:
@@ -144,12 +362,16 @@ def get_rank(rank_id: int) -> sqlite3.Row | None:
         return conn.execute("SELECT * FROM ranks WHERE id=?", (rank_id,)).fetchone()
 
 
-def rank_ladder() -> list[sqlite3.Row]:
+def rank_ladder(department_id: int | None = None) -> list[sqlite3.Row]:
     """Lowest rank first, used for score-based resolution."""
+    sql = "SELECT * FROM ranks"
+    params: list[Any] = []
+    if department_id is not None:
+        sql += " WHERE department_id = ?"
+        params.append(department_id)
+    sql += " ORDER BY level ASC, min_score ASC, id ASC"
     with connect() as conn:
-        return conn.execute(
-            "SELECT * FROM ranks ORDER BY level ASC, min_score ASC, id ASC"
-        ).fetchall()
+        return conn.execute(sql, params).fetchall()
 
 
 def create_rank(
@@ -159,18 +381,36 @@ def create_rank(
     min_score: int = 0,
     color: str = "#6b7280",
     description: str = "",
+    department_id: int | None = None,
 ) -> int:
     with connect() as conn:
         cur = conn.execute(
-            "INSERT INTO ranks(name, role_id, level, min_score, color, description, created_at)"
-            " VALUES(?,?,?,?,?,?,?)",
-            (name.strip(), role_id, level, min_score, color, description.strip(), now()),
+            "INSERT INTO ranks(name, role_id, level, min_score, color, description,"
+            " department_id, created_at) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                name.strip(),
+                role_id,
+                level,
+                min_score,
+                color,
+                description.strip(),
+                department_id,
+                now(),
+            ),
         )
         return int(cur.lastrowid)
 
 
 def update_rank(rank_id: int, **fields: Any) -> None:
-    allowed = {"name", "role_id", "level", "min_score", "color", "description"}
+    allowed = {
+        "name",
+        "role_id",
+        "level",
+        "min_score",
+        "color",
+        "description",
+        "department_id",
+    }
     sets, values = [], []
     for key, value in fields.items():
         if key not in allowed:
@@ -189,13 +429,27 @@ def delete_rank(rank_id: int) -> None:
         conn.execute("DELETE FROM ranks WHERE id=?", (rank_id,))
 
 
-def resolve_rank_for_score(score: int) -> sqlite3.Row | None:
-    """Pick the highest rank whose min_score the member satisfies."""
+def resolve_rank_for_score(score: int, department_id: int | None = None) -> sqlite3.Row | None:
+    """Pick the highest rank of the department whose min_score the member satisfies."""
     chosen = None
-    for rank in rank_ladder():
+    for rank in rank_ladder(department_id):
         if score >= int(rank["min_score"]):
             chosen = rank
     return chosen
+
+
+def next_rank_in_department(rank_id: int) -> sqlite3.Row | None:
+    """Rank directly above the given one inside the same department."""
+    rank = get_rank(rank_id)
+    if rank is None:
+        return None
+    for candidate in rank_ladder(rank["department_id"]):
+        if int(candidate["level"]) > int(rank["level"]) or (
+            int(candidate["level"]) == int(rank["level"])
+            and int(candidate["min_score"]) > int(rank["min_score"])
+        ):
+            return candidate
+    return None
 
 
 # -------------------------------------------------------------------------- members
@@ -208,8 +462,12 @@ def get_member_full(discord_id: int) -> sqlite3.Row | None:
     with connect() as conn:
         return conn.execute(
             "SELECT m.*, r.name AS rank_name, r.color AS rank_color,"
-            " r.level AS rank_level, r.role_id AS rank_role_id"
-            " FROM members m LEFT JOIN ranks r ON r.id = m.rank_id WHERE m.discord_id=?",
+            " r.level AS rank_level, r.role_id AS rank_role_id,"
+            " d.name AS department_name, d.color AS department_color"
+            " FROM members m"
+            " LEFT JOIN ranks r ON r.id = m.rank_id"
+            " LEFT JOIN departments d ON d.id = m.department_id"
+            " WHERE m.discord_id=?",
             (discord_id,),
         ).fetchone()
 
@@ -260,6 +518,7 @@ def upsert_member(
 def update_member(discord_id: int, **fields: Any) -> None:
     allowed = {
         "rank_id",
+        "department_id",
         "callsign",
         "note",
         "active",
@@ -283,10 +542,18 @@ def update_member(discord_id: int, **fields: Any) -> None:
         conn.execute(f"UPDATE members SET {', '.join(sets)} WHERE discord_id=?", values)
 
 
-def list_members(search: str = "", rank_id: int | None = None) -> list[sqlite3.Row]:
+def list_members(
+    search: str = "",
+    rank_id: int | None = None,
+    department_id: int | None = None,
+) -> list[sqlite3.Row]:
     sql = (
-        "SELECT m.*, r.name AS rank_name, r.color AS rank_color, r.level AS rank_level"
-        " FROM members m LEFT JOIN ranks r ON r.id = m.rank_id WHERE 1=1"
+        "SELECT m.*, r.name AS rank_name, r.color AS rank_color, r.level AS rank_level,"
+        " d.name AS department_name, d.color AS department_color"
+        " FROM members m"
+        " LEFT JOIN ranks r ON r.id = m.rank_id"
+        " LEFT JOIN departments d ON d.id = m.department_id"
+        " WHERE 1=1"
     )
     params: list[Any] = []
     if search:
@@ -296,7 +563,13 @@ def list_members(search: str = "", rank_id: int | None = None) -> list[sqlite3.R
     if rank_id is not None:
         sql += " AND m.rank_id = ?"
         params.append(rank_id)
-    sql += " ORDER BY COALESCE(r.level, -1) DESC, m.score DESC, m.display_name COLLATE NOCASE"
+    if department_id is not None:
+        sql += " AND m.department_id = ?"
+        params.append(department_id)
+    sql += (
+        " ORDER BY COALESCE(r.level, -1) DESC, m.score DESC,"
+        " m.display_name COLLATE NOCASE"
+    )
     with connect() as conn:
         return conn.execute(sql, params).fetchall()
 
@@ -458,17 +731,49 @@ def member_rank_rows() -> dict[str, int]:
     return {str(r["rid"]): int(r["c"]) for r in rows}
 
 
+def department_rank_rows() -> dict[str, int]:
+    """Member counts keyed by (department id, rank id) for the department ladders."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT department_id AS did, COALESCE(rank_id, 0) AS rid, COUNT(*) AS c"
+            " FROM members GROUP BY department_id, rank_id"
+        ).fetchall()
+    out: dict[str, int] = {}
+    for row in rows:
+        key = f"{row['did'] or 0}:{row['rid']}"
+        out[key] = int(row["c"])
+    return out
+
+
 def seed_defaults() -> None:
     """Seed the rank ladder and mark presets into a fresh database."""
     with connect() as conn:
+        has_depts = conn.execute("SELECT COUNT(*) AS c FROM departments").fetchone()["c"]
         has_ranks = conn.execute("SELECT COUNT(*) AS c FROM ranks").fetchone()["c"]
+        if not has_depts and not has_ranks:
+            dept_id = insert_department(conn, *DEFAULT_DEPARTMENT)
+            conn.execute(
+                "INSERT INTO settings(key, value) VALUES('default_department_id', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (str(dept_id),),
+            )
+        elif has_depts:
+            row = conn.execute("SELECT id FROM departments ORDER BY id LIMIT 1").fetchone()
+            conn.execute(
+                "INSERT INTO settings(key, value) VALUES('default_department_id', ?)"
+                " ON CONFLICT(key) DO NOTHING",
+                (str(row["id"]),),
+            )
+
         if not has_ranks:
+            dept_row = conn.execute("SELECT id FROM departments ORDER BY id LIMIT 1").fetchone()
+            dept_id = int(dept_row["id"]) if dept_row else None
             ts = now()
             for name, level, min_score, color in DEFAULT_RANKS:
                 conn.execute(
-                    "INSERT INTO ranks(name, level, min_score, color, description, created_at)"
-                    " VALUES(?,?,?,?,?,?)",
-                    (name, level, min_score, color, "Стартовый ранг", ts),
+                    "INSERT INTO ranks(name, level, min_score, color, description,"
+                    " department_id, created_at) VALUES(?,?,?,?,?,?,?)",
+                    (name, level, min_score, color, "Стартовый ранг", dept_id, ts),
                 )
         has_presets = conn.execute("SELECT COUNT(*) AS c FROM marker_presets").fetchone()["c"]
         if not has_presets:
@@ -476,3 +781,11 @@ def seed_defaults() -> None:
                 conn.execute(
                     "INSERT INTO marker_presets(title, delta) VALUES(?,?)", (title, delta)
                 )
+
+
+def insert_department(conn: sqlite3.Connection, name: str, description: str, color: str) -> int:
+    cur = conn.execute(
+        "INSERT INTO departments(name, description, color, created_at) VALUES(?,?,?,?)",
+        (name, description, color, now()),
+    )
+    return int(cur.lastrowid)

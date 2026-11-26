@@ -7,7 +7,10 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-os.environ["DB_PATH"] = str(Path(__file__).resolve().parents[1] / "data" / "test_role.db")
+DB_FILE = Path(__file__).resolve().parents[1] / "data" / "test_role.db"
+for _suffix in ("", "-wal", "-shm"):
+    Path(str(DB_FILE) + _suffix).unlink(missing_ok=True)
+os.environ["DB_PATH"] = str(DB_FILE)
 os.environ.setdefault("BASE_URL", "http://localhost:8000")
 os.environ.setdefault("SESSION_SECRET", "test-secret")
 

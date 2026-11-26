@@ -20,6 +20,7 @@
       {% endif %}
       {% if officer %}
         <a href="/members" class="{% if request.url.path == '/members' %}active{% endif %}">Состав</a>
+        <a href="/departments" class="{% if request.url.path.startswith('/departments') %}active{% endif %}">Отделы</a>
         <a href="/ranks" class="{% if request.url.path == '/ranks' %}active{% endif %}">Ранги</a>
         <a href="/settings" class="{% if request.url.path == '/settings' %}active{% endif %}">Настройки</a>
       {% endif %}
